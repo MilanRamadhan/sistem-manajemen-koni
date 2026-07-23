@@ -1,0 +1,28 @@
+{
+  "id": 1000,
+  "actor_id": 7,
+  "action": "CREATE",
+  "entity_type": "prestasi",
+  "entity_id": 15,
+  "old_values": null,
+  "new_values": {
+    "id": 15,
+    "atlet_id": 42,
+    "cabang_olahraga_id": 3,
+    "medali": "Perak",
+    "metadata_dinamis": {
+      "jumlah_ronde_menang": 2
+    }
+  },
+  "changed_fields": [
+    "id",
+    "atlet_id",
+    "cabang_olahraga_id",
+    "medali",
+    "metadata_dinamis"
+  ],
+  "ip_address": "192.0.2.10",
+  "user_agent": "Mozilla/5.0",
+  "request_id": "7ef52038-f23e-4b7f-b51d-cd53c8987e2a",
+  "created_at": "2026-07-23T10:00:00+07:00"
+}
