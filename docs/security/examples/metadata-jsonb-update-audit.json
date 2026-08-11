@@ -1,0 +1,24 @@
+{
+  "id": 1004,
+  "actor_id": 7,
+  "action": "UPDATE",
+  "entity_type": "prestasi",
+  "entity_id": 15,
+  "old_values": {
+    "metadata_dinamis": {
+      "jumlah_ronde_menang": 2
+    }
+  },
+  "new_values": {
+    "metadata_dinamis": {
+      "jumlah_ronde_menang": 3
+    }
+  },
+  "changed_fields": [
+    "metadata_dinamis"
+  ],
+  "ip_address": "192.0.2.10",
+  "user_agent": "Mozilla/5.0",
+  "request_id": "aa3a4e2c-c916-4d54-ab85-51f37eef64e4",
+  "created_at": "2026-07-23T10:20:00+07:00"
+}

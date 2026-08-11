@@ -1,202 +1,115 @@
--- PostgreSQL reference schema for the KONI audit trail.
---
--- This is intentionally not tied to a migration framework because no backend,
--- ORM, or migration tool exists in the repository yet. Adapt this file into
--- the migration system selected by the backend team; do not run it blindly in
--- production without replacing the role grants described at the end.
+-- Skema referensi PostgreSQL untuk audit trail data prestasi KONI Aceh.
+-- File ini tidak terikat framework/migration tool karena backend belum tersedia.
 
 BEGIN;
 
 CREATE TABLE public.audit_logs (
-    id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    actor_id        text NULL,
-    action          text NOT NULL,
-    entity_type     text NOT NULL,
-    entity_id       text NULL,
-    old_values      jsonb NULL,
-    new_values      jsonb NULL,
-    changed_fields  jsonb NULL,
-    request_id      text NULL,
-    ip_address      inet NULL,
-    user_agent      text NULL,
-    created_at      timestamptz NOT NULL DEFAULT clock_timestamp(),
+    id              BIGSERIAL PRIMARY KEY,
+    actor_id        BIGINT NULL,
+    action          VARCHAR(16) NOT NULL,
+    entity_type     VARCHAR(100) NOT NULL,
+    entity_id       BIGINT NOT NULL,
+    old_values      JSONB NULL,
+    new_values      JSONB NULL,
+    changed_fields  JSONB NULL,
+    ip_address      INET NULL,
+    user_agent      TEXT NULL,
+    request_id      UUID NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT audit_logs_action_check CHECK (
-        action IN (
-            'CREATE',
-            'UPDATE',
-            'DELETE',
-            'ARCHIVE',
-            'LOGIN',
-            'UPLOAD_DOCUMENT',
-            'DOWNLOAD_DOCUMENT',
-            'REPLACE_DOCUMENT'
-        )
-    ),
-    CONSTRAINT audit_logs_entity_type_not_blank CHECK (btrim(entity_type) <> ''),
-    CONSTRAINT audit_logs_changed_fields_is_array CHECK (
-        changed_fields IS NULL OR jsonb_typeof(changed_fields) = 'array'
-    )
+    CONSTRAINT audit_logs_action_check
+        CHECK (action IN ('CREATE', 'UPDATE', 'DELETE', 'ARCHIVE')),
+    CONSTRAINT audit_logs_entity_type_not_blank
+        CHECK (BTRIM(entity_type) <> ''),
+    CONSTRAINT audit_logs_old_values_object
+        CHECK (old_values IS NULL OR JSONB_TYPEOF(old_values) = 'object'),
+    CONSTRAINT audit_logs_new_values_object
+        CHECK (new_values IS NULL OR JSONB_TYPEOF(new_values) = 'object'),
+    CONSTRAINT audit_logs_changed_fields_array
+        CHECK (changed_fields IS NULL OR JSONB_TYPEOF(changed_fields) = 'array')
 );
 
 CREATE INDEX audit_logs_entity_idx
     ON public.audit_logs (entity_type, entity_id);
-
-CREATE INDEX audit_logs_actor_idx
+CREATE INDEX audit_logs_actor_id_idx
     ON public.audit_logs (actor_id);
-
 CREATE INDEX audit_logs_action_idx
     ON public.audit_logs (action);
-
 CREATE INDEX audit_logs_created_at_idx
     ON public.audit_logs (created_at DESC);
+CREATE INDEX audit_logs_request_id_idx
+    ON public.audit_logs (request_id)
+    WHERE request_id IS NOT NULL;
 
--- Recursively redact sensitive values. Redaction is deliberately performed
--- again at the database boundary so a missed application-level field cannot
--- leak a credential into a permanent log.
-CREATE OR REPLACE FUNCTION public.redact_audit_json(input_value jsonb)
-RETURNS jsonb
-LANGUAGE plpgsql
-IMMUTABLE
-PARALLEL SAFE
-SET search_path = pg_catalog, public
-AS $$
-DECLARE
-    result jsonb;
-BEGIN
-    IF input_value IS NULL THEN
-        RETURN NULL;
-    END IF;
+COMMENT ON TABLE public.audit_logs IS
+    'Catatan append-only perubahan data untuk akuntabilitas dan keterlacakan aktivitas sistem.';
+COMMENT ON COLUMN public.audit_logs.id IS
+    'Identitas unik audit log yang dibuat PostgreSQL.';
+COMMENT ON COLUMN public.audit_logs.actor_id IS
+    'Identitas pengguna/pelaku; nullable untuk proses sistem atau saat identitas tidak tersedia. Tidak memakai foreign key sampai model autentikasi tersedia.';
+COMMENT ON COLUMN public.audit_logs.action IS
+    'Aksi yang diizinkan: CREATE, UPDATE, DELETE, atau ARCHIVE.';
+COMMENT ON COLUMN public.audit_logs.entity_type IS
+    'Nama tipe entitas domain yang berubah, misalnya prestasi.';
+COMMENT ON COLUMN public.audit_logs.entity_id IS
+    'Identitas numerik entitas yang berubah.';
+COMMENT ON COLUMN public.audit_logs.old_values IS
+    'Snapshot objek JSON sebelum perubahan; null untuk CREATE.';
+COMMENT ON COLUMN public.audit_logs.new_values IS
+    'Snapshot objek JSON sesudah perubahan; null untuk DELETE.';
+COMMENT ON COLUMN public.audit_logs.changed_fields IS
+    'Array JSON nama field tingkat atas yang berubah.';
+COMMENT ON COLUMN public.audit_logs.ip_address IS
+    'Alamat IP client yang telah ditentukan menggunakan konfigurasi trusted proxy.';
+COMMENT ON COLUMN public.audit_logs.user_agent IS
+    'User-Agent request; panjangnya perlu dibatasi pada lapisan aplikasi.';
+COMMENT ON COLUMN public.audit_logs.request_id IS
+    'UUID korelasi untuk menelusuri seluruh aktivitas dari satu request.';
+COMMENT ON COLUMN public.audit_logs.created_at IS
+    'Waktu pencatatan menurut server database, termasuk zona waktu.';
 
-    CASE jsonb_typeof(input_value)
-        WHEN 'object' THEN
-            SELECT COALESCE(
-                jsonb_object_agg(
-                    item.key,
-                    CASE
-                        WHEN lower(item.key) ~
-                            '(password|passphrase|token|api[^a-z0-9]*key|authorization|session[^a-z0-9]*cookie|secret)'
-                        THEN to_jsonb('[REDACTED]'::text)
-                        ELSE public.redact_audit_json(item.value)
-                    END
-                ),
-                '{}'::jsonb
-            )
-            INTO result
-            FROM jsonb_each(input_value) AS item;
-
-            RETURN result;
-
-        WHEN 'array' THEN
-            SELECT COALESCE(
-                jsonb_agg(public.redact_audit_json(item.value) ORDER BY item.ordinality),
-                '[]'::jsonb
-            )
-            INTO result
-            FROM jsonb_array_elements(input_value) WITH ORDINALITY AS item(value, ordinality);
-
-            RETURN result;
-
-        ELSE
-            RETURN input_value;
-    END CASE;
-END;
-$$;
-
--- The only intended write interface. The application must call this function
--- on the SAME connection and inside the SAME transaction as the data mutation.
-CREATE OR REPLACE FUNCTION public.record_audit_log(
-    p_actor_id text,
-    p_action text,
-    p_entity_type text,
-    p_entity_id text,
-    p_old_values jsonb,
-    p_new_values jsonb,
-    p_changed_fields jsonb,
-    p_request_id text DEFAULT NULL,
-    p_ip_address inet DEFAULT NULL,
-    p_user_agent text DEFAULT NULL
-)
-RETURNS bigint
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, public
-AS $$
-DECLARE
-    inserted_id bigint;
-BEGIN
-    IF p_changed_fields IS NOT NULL
-       AND jsonb_typeof(p_changed_fields) <> 'array' THEN
-        RAISE EXCEPTION 'changed_fields must be a JSON array'
-            USING ERRCODE = '22023';
-    END IF;
-
-    INSERT INTO public.audit_logs (
-        actor_id,
-        action,
-        entity_type,
-        entity_id,
-        old_values,
-        new_values,
-        changed_fields,
-        request_id,
-        ip_address,
-        user_agent
-    )
-    VALUES (
-        p_actor_id,
-        upper(p_action),
-        p_entity_type,
-        p_entity_id,
-        public.redact_audit_json(p_old_values),
-        public.redact_audit_json(p_new_values),
-        public.redact_audit_json(p_changed_fields),
-        p_request_id,
-        p_ip_address,
-        p_user_agent
-    )
-    RETURNING id INTO inserted_id;
-
-    RETURN inserted_id;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION public.reject_audit_log_mutation()
-RETURNS trigger
+CREATE OR REPLACE FUNCTION public.prevent_audit_log_mutation()
+RETURNS TRIGGER
 LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
 BEGIN
-    RAISE EXCEPTION 'audit_logs is append-only; % is forbidden', TG_OP
+    RAISE EXCEPTION
+        'audit_logs bersifat append-only; operasi % tidak diizinkan',
+        TG_OP
         USING ERRCODE = '42501';
 END;
 $$;
 
-CREATE TRIGGER audit_logs_no_update_or_delete
-BEFORE UPDATE OR DELETE ON public.audit_logs
-FOR EACH ROW
-EXECUTE FUNCTION public.reject_audit_log_mutation();
+COMMENT ON FUNCTION public.prevent_audit_log_mutation() IS
+    'Menolak perubahan dan penghapusan terhadap baris audit_logs.';
 
-CREATE TRIGGER audit_logs_no_truncate
+CREATE TRIGGER audit_logs_prevent_update
+BEFORE UPDATE ON public.audit_logs
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_audit_log_mutation();
+
+CREATE TRIGGER audit_logs_prevent_delete
+BEFORE DELETE ON public.audit_logs
+FOR EACH ROW
+EXECUTE FUNCTION public.prevent_audit_log_mutation();
+
+-- TRUNCATE tidak menjalankan trigger per baris, sehingga perlu dilindungi
+-- secara eksplisit agar tidak menjadi jalan pintas untuk mengosongkan log.
+CREATE TRIGGER audit_logs_prevent_truncate
 BEFORE TRUNCATE ON public.audit_logs
 FOR EACH STATEMENT
-EXECUTE FUNCTION public.reject_audit_log_mutation();
+EXECUTE FUNCTION public.prevent_audit_log_mutation();
 
--- PostgreSQL functions are executable by PUBLIC by default. Remove that access
--- and grant only to the actual runtime/read-only roles after those roles exist.
-REVOKE ALL ON FUNCTION public.record_audit_log(
-    text, text, text, text, jsonb, jsonb, jsonb, text, inet, text
-) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.redact_audit_json(jsonb) FROM PUBLIC;
-
-REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.audit_logs FROM PUBLIC;
-
--- Deployment template (replace role names after the backend roles are final):
--- GRANT EXECUTE ON FUNCTION public.record_audit_log(
---     text, text, text, text, jsonb, jsonb, jsonb, text, inet, text
--- ) TO koni_app_runtime;
--- GRANT SELECT ON TABLE public.audit_logs TO koni_audit_reader;
--- GRANT SELECT ON TABLE public.audit_logs TO koni_app_runtime;
--- Do not grant INSERT/UPDATE/DELETE/TRUNCATE on audit_logs to runtime roles.
+-- Contoh hardening hak akses produksi. Jangan jalankan sebelum nama role final:
+--
+-- REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON public.audit_logs FROM koni_app;
+-- REVOKE USAGE, SELECT ON SEQUENCE public.audit_logs_id_seq FROM koni_app;
+-- GRANT INSERT ON public.audit_logs TO koni_app;
+-- GRANT USAGE, SELECT ON SEQUENCE public.audit_logs_id_seq TO koni_app;
+-- GRANT SELECT ON public.audit_logs TO koni_audit_reader;
+--
+-- Role aplikasi idealnya hanya dapat INSERT dan tidak dapat UPDATE/DELETE.
+-- Hak SELECT diberikan hanya kepada role pembaca audit yang berwenang.
 
 COMMIT;

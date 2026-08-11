@@ -1,0 +1,24 @@
+{
+  "id": 1002,
+  "actor_id": 7,
+  "action": "DELETE",
+  "entity_type": "prestasi",
+  "entity_id": 15,
+  "old_values": {
+    "id": 15,
+    "atlet_id": 42,
+    "medali": "Emas",
+    "status": "AKTIF"
+  },
+  "new_values": null,
+  "changed_fields": [
+    "id",
+    "atlet_id",
+    "medali",
+    "status"
+  ],
+  "ip_address": "192.0.2.10",
+  "user_agent": "Mozilla/5.0",
+  "request_id": "2448879f-c2ae-4d9b-a649-88643e1f79e6",
+  "created_at": "2026-07-23T10:10:00+07:00"
+}
